@@ -1,6 +1,7 @@
 ---
 name: frontseat-tasks
 description: Create, file or list tasks and projects on a FrontSeat board with the frontseat-cli command. Use when the user asks to create, file, add or log FrontSeat tasks (e.g. "create a FrontSeat task for each of these", "put this on the FrontSeat board"), to see which tasks a FrontSeat project already has, or to list their FrontSeat projects.
+allowed-tools: Bash(frontseat-cli whoami *), Bash(frontseat-cli project list *), Bash(frontseat-cli task list *), Bash(frontseat-cli task create *)
 ---
 
 # FrontSeat tasks

@@ -160,6 +160,20 @@ mkdir -p .claude/skills && cp -R /path/to/frontseat/cli/skills/frontseat-tasks .
 Then, in a session: *"create a FrontSeat task for each of these three
 improvements"*.
 
+The skill's `allowed-tools` pre-approves its four `frontseat-cli` commands, so
+Claude Code does not ask before running them, `task create` included. That is
+deliberate: a created task only lands in Planning and nothing starts until a
+human moves it on the board, so FrontSeat itself is the gate and a permission
+prompt in front of it would only add friction. If your Claude Code setup
+ignores skill-granted permissions (e.g. managed settings with
+`allowManagedPermissionRulesOnly`) or auto mode still blocks the create, add
+the rule yourself to `~/.claude/settings.json` (or a project's
+`.claude/settings.local.json`):
+
+```json
+{ "permissions": { "allow": ["Bash(frontseat-cli task create *)"] } }
+```
+
 ## Development
 
 The tests use only the standard library and run against a stub HTTP server:
