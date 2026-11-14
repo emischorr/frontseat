@@ -158,6 +158,8 @@ defmodule FrontSeatWeb.Router do
       live "/settings/providers/new", SettingsLive.Providers, :new
       live "/settings/providers/:id/edit", SettingsLive.Providers, :edit
 
+      live "/settings/ui", SettingsLive.Ui, :edit
+
       live "/settings/organization", SettingsLive.Organization, :edit
       live "/settings/organization/env/new", SettingsLive.Organization, :new_env
       live "/settings/organization/env/:key/edit", SettingsLive.Organization, :edit_env

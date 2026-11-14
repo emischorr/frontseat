@@ -83,6 +83,30 @@ defmodule FrontSeatWeb.BoardLiveTest do
     end
   end
 
+  describe "cost display on cards" do
+    test "hidden by default", %{conn: conn} do
+      project = project_fixture()
+      task = task_fixture(project.id)
+
+      assert FrontSeat.Accounts.get_ui_settings() == %{show_cost_on_cards: false}
+
+      {:ok, view, _html} = live(conn, ~p"/projects/#{project.id}/board")
+
+      refute has_element?(view, "#task-card-#{task.id}-cost")
+    end
+
+    test "shown once the UI setting is turned on", %{conn: conn, scope: scope} do
+      {:ok, _} = FrontSeat.Accounts.update_ui_settings(scope, %{"show_cost_on_cards" => "true"})
+
+      project = project_fixture()
+      task = task_fixture(project.id)
+
+      {:ok, view, _html} = live(conn, ~p"/projects/#{project.id}/board")
+
+      assert has_element?(view, "#task-card-#{task.id}-cost")
+    end
+  end
+
   describe "mobile column" do
     test "opens on planning by default", %{conn: conn} do
       project = project_fixture()

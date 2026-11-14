@@ -1,4 +1,4 @@
-# Web UI (last updated: 2026-11-14, API token pages)
+# Web UI (last updated: 2026-11-14, UI settings)
 
 The web layer: the Kanban board, the task page, and the settings
 area — all LiveViews. Product spec §13 is the target; this note maps
@@ -21,6 +21,7 @@ what exists today.
 | `/settings/agents` | `FrontSeatWeb.SettingsLive.Agents` | org- and project-scoped agents; `/new` and `/:id/edit` |
 | `/settings/projects` | `FrontSeatWeb.SettingsLive.Projects` | list; `/new` |
 | `/settings/projects/:id` | `FrontSeatWeb.SettingsLive.Project` (`:show`) | details, approve defaults, PR template, repositories, env store, this project's own agents, default reviewers |
+| `/settings/ui` | `FrontSeatWeb.SettingsLive.Ui` | instance-wide UI display preferences, admin-only |
 | `/projects/:project_id/tasks/:id/artifact` | `FrontSeatWeb.TaskArtifactController` (`:download`) | a folder task's task folder, zipped |
 | `/setup` | `FrontSeatWeb.SetupLive` (`:index`) | first-run wizard, only while `setup_done` is false |
 | `/users/*` | `FrontSeatWeb.UserLive.*` | log in (username/password by default, email magic-link opt-in), magic-link confirmation, account settings (email/password, plus personal preferences: language, timezone, theme) |
@@ -46,7 +47,7 @@ them render the same sidebar from the `@nav` map assigned by
 `FrontSeatWeb.NavContext` — see [`navigation.md`](navigation.md).
 
 **Authorization is enforced in the contexts and mirrored in the UI.**
-Admin-only settings tiles (Users, Providers, Organization) are hidden
+Admin-only settings tiles (Users, Providers, UI, Organization) are hidden
 from members; project-keyed pages need `:view_project`; board and task
 action buttons render only when `Policy.can?/3` allows the action — and
 the context still refuses if someone gets past the hiding
@@ -124,6 +125,18 @@ their form. `Agents.create_agent/2`, `update_agent/3` and
 checked against both the current and the target scope. The project
 detail page's **Agents** tile (`Agents.list_project_agents/1`) surfaces
 only that project's own agents and links back to `/settings/agents`.
+
+**UI** (`/settings/ui`, admin-only) holds instance-wide display
+preferences — currently just whether cost, token count, and run
+duration show on task cards, under `organization.settings["ui"]`.
+`Accounts.update_ui_settings/2` merges into that `"ui"` key only, so
+`"setup_done"` and anything else in `settings` survives untouched; the
+same reasoning as `details_changeset/2` below, but reached from the
+other direction since this page's whole job *is* to write into
+`settings`. `BoardLive` reads the flag once per mount
+(`Accounts.get_ui_settings/0`) and passes it down through `board_ctx`
+to `task_card`'s `show_cost?` attr, which skips rendering `cost_stat`
+entirely when off rather than rendering blank dashes.
 
 **Organization** (`/settings/organization`, admin-only) edits the org
 name, the org-wide budget limits, the default project budget limits

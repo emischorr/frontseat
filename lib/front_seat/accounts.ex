@@ -72,6 +72,56 @@ defmodule FrontSeat.Accounts do
     end
   end
 
+  @ui_settings_types %{show_cost_on_cards: :boolean}
+
+  @doc """
+  The instance-wide UI settings stored under `organization.settings["ui"]`.
+  """
+  @spec get_ui_settings() :: %{show_cost_on_cards: boolean()}
+  def get_ui_settings do
+    get_organization!() |> ui_settings_from()
+  end
+
+  @doc """
+  Changeset for the UI settings form.
+  """
+  @spec change_ui_settings(Organization.t(), map()) :: Ecto.Changeset.t()
+  def change_ui_settings(organization, attrs \\ %{}) do
+    {ui_settings_from(organization), @ui_settings_types}
+    |> Ecto.Changeset.cast(attrs, Map.keys(@ui_settings_types))
+  end
+
+  @doc """
+  Updates the UI settings, merged into `organization.settings["ui"]` without
+  disturbing any other key (`"setup_done"` included).
+  """
+  @spec update_ui_settings(Scope.t() | nil, map()) ::
+          {:ok, Organization.t()} | {:error, :unauthorized | Ecto.Changeset.t()}
+  def update_ui_settings(scope, attrs) do
+    with :ok <- Policy.authorize(scope, :manage_organization) do
+      organization = get_organization!()
+      changeset = change_ui_settings(organization, attrs)
+
+      case Ecto.Changeset.apply_action(changeset, :update) do
+        {:ok, ui_settings} ->
+          settings =
+            Map.put(organization.settings, "ui", %{
+              "show_cost_on_cards" => ui_settings.show_cost_on_cards
+            })
+
+          update_organization(%{settings: settings})
+
+        {:error, changeset} ->
+          {:error, changeset}
+      end
+    end
+  end
+
+  defp ui_settings_from(%Organization{settings: settings}) do
+    ui = Map.get(settings, "ui", %{})
+    %{show_cost_on_cards: Map.get(ui, "show_cost_on_cards", false)}
+  end
+
   ## Org env store
   #
   # Merged into every project's env vars by `FrontSeat.Projects.env_vars/1`

@@ -13,7 +13,7 @@ defmodule FrontSeatWeb.SettingsLiveTest do
     test "renders a tile per section", %{conn: conn} do
       {:ok, view, _html} = live(conn, ~p"/settings")
 
-      for id <- ~w(users providers agents projects organization) do
+      for id <- ~w(users providers agents projects ui organization) do
         assert has_element?(view, "#settings-tile-#{id}")
       end
     end
@@ -37,6 +37,18 @@ defmodule FrontSeatWeb.SettingsLiveTest do
 
       assert has_element?(view, "a#settings-tile-organization")
       refute has_element?(view, "#settings-tile-organization[aria-disabled]")
+    end
+
+    test "the ui tile links to the ui page and reflects the current setting", %{
+      conn: conn,
+      scope: scope
+    } do
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      assert render(element(view, "#settings-tile-ui")) =~ "Cost hidden on cards"
+
+      {:ok, _} = FrontSeat.Accounts.update_ui_settings(scope, %{"show_cost_on_cards" => "true"})
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      assert render(element(view, "#settings-tile-ui")) =~ "Cost shown on cards"
     end
 
     test "a tile navigates to its section", %{conn: conn} do
