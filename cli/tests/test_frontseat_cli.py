@@ -339,6 +339,90 @@ class CommandTest(CliTestCase):
         self.assertEqual(json.loads(out)["data"]["url"], TASK["url"])
 
 
+class HeadersTest(CliTestCase):
+    def setUp(self):
+        super().setUp()
+        self.write(os.path.join(self.repo, ".frontseat"), {"project": 12})
+
+    def test_env_headers_reach_the_server_with_bearer_and_user_agent_intact(self):
+        env = dict(self.env, FRONTSEAT_HEADERS="P-Access-Token-Id: abc\nP-Access-Token: xyz")
+        code, _out, err = self.run_cli("whoami", env=env)
+        self.assertEqual(code, 0, err)
+        headers = self.stub.requests[-1]["headers"]
+        self.assertEqual(headers["P-Access-Token-Id"], "abc")
+        self.assertEqual(headers["P-Access-Token"], "xyz")
+        self.assertEqual(headers["Authorization"], "Bearer " + TOKEN)
+        self.assertEqual(headers["User-Agent"], "frontseat-cli/" + cli.VERSION)
+
+    def test_user_config_headers_are_sent_and_env_wins_over_them(self):
+        self.user_config({"headers": {"P-Access-Token-Id": "cfg-id"}})
+        base_env = {"HOME": self.home, "FRONTSEAT_URL": self.stub.url, "FRONTSEAT_TOKEN": TOKEN}
+
+        code, _out, err = self.run_cli("whoami", env=base_env)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.stub.requests[-1]["headers"]["P-Access-Token-Id"], "cfg-id")
+
+        env = dict(base_env, FRONTSEAT_HEADERS="P-Access-Token-Id: env-id")
+        code, _out, err = self.run_cli("whoami", env=env)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.stub.requests[-1]["headers"]["P-Access-Token-Id"], "env-id")
+
+    def test_malformed_header_line_is_a_configuration_error(self):
+        env = dict(self.env, FRONTSEAT_HEADERS="no-colon-here")
+        code, _out, err = self.run_cli("whoami", env=env)
+        self.assertEqual(code, cli.EXIT_CONFIG)
+        self.assertIn("Invalid header line", err)
+        self.assertEqual(self.stub.requests, [])
+
+    def test_invalid_header_name_is_a_configuration_error(self):
+        env = dict(self.env, FRONTSEAT_HEADERS="Bad Name: value")
+        code, _out, err = self.run_cli("whoami", env=env)
+        self.assertEqual(code, cli.EXIT_CONFIG)
+        self.assertIn("Invalid header name", err)
+        self.assertEqual(self.stub.requests, [])
+
+    def test_crlf_in_a_header_value_is_a_configuration_error(self):
+        env = dict(self.env, FRONTSEAT_HEADERS="X-Custom: ab\rcd")
+        code, _out, err = self.run_cli("whoami", env=env)
+        self.assertEqual(code, cli.EXIT_CONFIG)
+        self.assertIn("carriage return", err)
+        self.assertEqual(self.stub.requests, [])
+
+    def test_reserved_header_name_is_refused_case_insensitively(self):
+        env = dict(self.env, FRONTSEAT_HEADERS="authorization: Bearer evil")
+        code, _out, err = self.run_cli("whoami", env=env)
+        self.assertEqual(code, cli.EXIT_CONFIG)
+        self.assertIn("manages itself", err)
+        self.assertEqual(self.stub.requests, [])
+
+    def test_non_string_header_value_in_user_config_is_an_error(self):
+        self.user_config({"headers": {"X-Custom": 123}})
+        env = {"HOME": self.home, "FRONTSEAT_URL": self.stub.url, "FRONTSEAT_TOKEN": TOKEN}
+        code, _out, err = self.run_cli("whoami", env=env)
+        self.assertEqual(code, cli.EXIT_CONFIG)
+        self.assertIn("must be an object whose values are strings", err)
+
+    def test_headers_in_project_file_is_an_error(self):
+        self.write(os.path.join(self.repo, ".frontseat"), {"project": 1, "headers": {"X": "y"}})
+        code, _out, err = self.run_cli("whoami")
+        self.assertEqual(code, cli.EXIT_CONFIG)
+        self.assertIn('contains "headers"', err)
+        self.assertEqual(self.stub.requests, [])
+
+    def test_whoami_lists_header_names_but_never_values(self):
+        env = dict(self.env, FRONTSEAT_HEADERS="P-Access-Token-Id: abc\nP-Access-Token: xyz")
+        code, out, _err = self.run_cli("whoami", env=env)
+        self.assertEqual(code, 0)
+        self.assertIn("Headers:  P-Access-Token-Id, P-Access-Token  (from FRONTSEAT_HEADERS)", out)
+        self.assertNotIn("abc", out)
+        self.assertNotIn("xyz", out)
+
+    def test_whoami_shows_none_without_headers_configured(self):
+        code, out, _err = self.run_cli("whoami")
+        self.assertEqual(code, 0)
+        self.assertIn("Headers:  none", out)
+
+
 class ErrorTest(CliTestCase):
     def setUp(self):
         super().setUp()
@@ -401,6 +485,26 @@ class ErrorTest(CliTestCase):
         self.assertEqual(code, cli.EXIT_CONFIG)
         self.assertIn("redirects to https://elsewhere.invalid", err)
         self.assertEqual(len(self.stub.requests), 1)
+
+    def test_redirect_hint_mentions_frontseat_headers(self):
+        self.stub.route("GET", "/api/v1/me", 302, "", {"Location": "https://proxy.invalid/login"})
+        code, _out, err = self.run_cli("whoami")
+        self.assertEqual(code, cli.EXIT_CONFIG)
+        self.assertIn("FRONTSEAT_HEADERS", err)
+        self.assertIn("currently: none", err)
+
+        env = dict(self.env, FRONTSEAT_HEADERS="P-Access-Token-Id: abc")
+        code, _out, err = self.run_cli("whoami", env=env)
+        self.assertEqual(code, cli.EXIT_CONFIG)
+        self.assertIn("currently: from FRONTSEAT_HEADERS", err)
+
+    def test_non_json_401_hint_mentions_frontseat_headers(self):
+        self.stub.route("GET", "/api/v1/me", 401, "<html>login</html>")
+        code, _out, err = self.run_cli("whoami")
+        self.assertEqual(code, cli.EXIT_API)
+        self.assertIn("Unexpected response", err)
+        self.assertIn("FRONTSEAT_HEADERS", err)
+        self.assertIn("currently: none", err)
 
     def test_connection_failure_exits_6(self):
         self.stub.close()
