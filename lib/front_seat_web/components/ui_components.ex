@@ -453,6 +453,42 @@ defmodule FrontSeatWeb.UIComponents do
   end
 
   @doc """
+  Renders the short `HH:MM:SS` clock time used in the agent feed. Same
+  server-renders-UTC-then-`.LocalTime`-rewrites-it approach as `.timestamp`,
+  just a different hook/format since the feed wants a bare clock time
+  rather than a relative label with a date tooltip.
+  """
+  attr :id, :string, required: true
+  attr :at, :any, default: nil
+  attr :class, :any, default: nil
+
+  def feed_time(assigns) do
+    ~H"""
+    <span id={@id} class={@class} phx-hook=".LocalFeedTime" data-at={Format.iso8601(@at)}>
+      {Format.time(@at)}
+    </span>
+    <script :type={Phoenix.LiveView.ColocatedHook} name=".LocalFeedTime">
+      // See `.LocalTime` for the `data-timezone` convention this reuses.
+      const tz = document.documentElement.dataset.timezone || undefined
+      const FMT = new Intl.DateTimeFormat(undefined, {
+        hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false, timeZone: tz
+      })
+
+      export default {
+        mounted() { this.localize() },
+        updated() { this.localize() },
+        localize() {
+          const at = this.el.dataset.at
+          if (!at) { return }
+          const parsed = new Date(at)
+          if (!isNaN(parsed)) { this.el.textContent = FMT.format(parsed) }
+        }
+      }
+    </script>
+    """
+  end
+
+  @doc """
   Renders the node that opens a timeline — the task's creation. Styled
   apart from the entries below it so the oldest-first order is legible
   at a glance.

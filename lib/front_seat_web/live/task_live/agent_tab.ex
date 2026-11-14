@@ -246,9 +246,11 @@ defmodule FrontSeatWeb.TaskLive.AgentTab do
           {group_label(@block.rows, @root)}
         </span>
         <span :if={pending?(@block.rows)} class="size-1.5 shrink-0 animate-pulse rounded-full bg-run" />
-        <span class="shrink-0 font-mono text-[10px] text-text3">
-          {Format.time(List.last(@block.rows).inserted_at)}
-        </span>
+        <.feed_time
+          id={"#{@id}-time"}
+          at={List.last(@block.rows).inserted_at}
+          class="shrink-0 font-mono text-[10px] text-text3"
+        />
       </button>
       <div :if={@block.expanded?} class="mt-1 flex flex-col gap-1 pl-5">
         <div :for={row <- @block.rows} class="flex items-start gap-2">
@@ -282,9 +284,11 @@ defmodule FrontSeatWeb.TaskLive.AgentTab do
         <span class="rounded-[5px] bg-accent px-1.5 py-0.5 text-[9.5px] font-bold tracking-wide text-white">
           REQUEST CHANGES
         </span>
-        <span class="ml-auto shrink-0 font-mono text-[10px] text-text3">
-          {Format.time(@row.inserted_at)}
-        </span>
+        <.feed_time
+          id={"#{@id}-time"}
+          at={@row.inserted_at}
+          class="ml-auto shrink-0 font-mono text-[10px] text-text3"
+        />
       </div>
       <p class="whitespace-pre-wrap break-words text-[13px] leading-relaxed text-text" phx-no-format>{@row.text}</p>
     </div>
@@ -311,7 +315,11 @@ defmodule FrontSeatWeb.TaskLive.AgentTab do
         >
           {resolution_label(@row.data["resolved"])}
         </span>
-        <span class="ml-auto font-mono text-[10px] text-text3">{Format.time(@row.inserted_at)}</span>
+        <.feed_time
+          id={"#{@id}-time"}
+          at={@row.inserted_at}
+          class="ml-auto font-mono text-[10px] text-text3"
+        />
       </div>
       <p class="whitespace-pre-wrap break-words text-[13px] leading-relaxed text-text" phx-no-format>{@row.text}</p>
       <.question_form :if={answerable?(@row, @executing?) && @can_operate?} id={@id} row={@row} />
@@ -332,7 +340,11 @@ defmodule FrontSeatWeb.TaskLive.AgentTab do
         ]}>
           {label(@row)}
         </span>
-        <span class="ml-auto font-mono text-[10px] text-text3">{Format.time(@row.inserted_at)}</span>
+        <.feed_time
+          id={"#{@id}-time"}
+          at={@row.inserted_at}
+          class="ml-auto font-mono text-[10px] text-text3"
+        />
       </div>
       <p
         class={["whitespace-pre-wrap break-words text-[13px] leading-relaxed", text_class(@row)]}
