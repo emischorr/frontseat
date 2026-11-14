@@ -208,12 +208,19 @@ defmodule FrontSeatWeb.TaskLive.TaskTab do
       </:actions>
 
       <div :if={!@editing?} id="task-description-view" class="flex flex-col gap-2.5">
-        <p class="whitespace-pre-wrap text-[13.5px] leading-relaxed text-text" phx-no-format>{@task.description || "No description yet."}</p>
+        <.markdown
+          :if={@task.description}
+          text={@task.description}
+          class="text-[13.5px] leading-relaxed text-text"
+        />
+        <p :if={!@task.description} class="text-[13.5px] leading-relaxed text-text">
+          No description yet.
+        </p>
         <div :if={@task.spec} class="flex flex-col gap-1.5">
           <span class="text-[11px] font-semibold uppercase tracking-wider text-text3">
             Spec / acceptance criteria
           </span>
-          <p class="whitespace-pre-wrap text-[13px] leading-relaxed text-text2" phx-no-format>{@task.spec}</p>
+          <.markdown text={@task.spec} class="text-[13px] leading-relaxed text-text2" />
         </div>
         <%!-- P6: exactly what gets injected into the agent's prompt,
               rendered verbatim. The edit surface is the finding row. --%>
