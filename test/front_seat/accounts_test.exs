@@ -43,6 +43,37 @@ defmodule FrontSeat.AccountsTest do
     end
   end
 
+  describe "ui settings" do
+    setup do
+      organization_fixture()
+      %{admin_scope: user_scope_fixture(admin_fixture())}
+    end
+
+    test "get_ui_settings/0 defaults to false" do
+      assert Accounts.get_ui_settings() == %{show_cost_on_cards: false}
+    end
+
+    test "update_ui_settings/2 persists the flag", %{admin_scope: scope} do
+      assert {:ok, org} = Accounts.update_ui_settings(scope, %{"show_cost_on_cards" => "true"})
+      assert org.settings["ui"]["show_cost_on_cards"] == true
+      assert Accounts.get_ui_settings() == %{show_cost_on_cards: true}
+    end
+
+    test "update_ui_settings/2 does not clobber setup_done or other settings", %{
+      admin_scope: scope
+    } do
+      {:ok, _} = Accounts.complete_setup()
+
+      assert {:ok, org} = Accounts.update_ui_settings(scope, %{"show_cost_on_cards" => "true"})
+      assert org.settings["setup_done"] == true
+    end
+
+    test "update_ui_settings/2 refuses a non-admin scope" do
+      member_scope = user_scope_fixture(user_fixture())
+      assert {:error, :unauthorized} = Accounts.update_ui_settings(member_scope, %{})
+    end
+  end
+
   describe "org env store" do
     setup do
       organization_fixture()

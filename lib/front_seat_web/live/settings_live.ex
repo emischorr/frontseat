@@ -31,6 +31,7 @@ defmodule FrontSeatWeb.SettingsLive do
      socket
      |> assign(page_title: "Settings", admin?: admin?)
      |> assign(organization: Accounts.get_organization!())
+     |> assign(show_cost_on_cards?: Accounts.get_ui_settings().show_cost_on_cards)
      |> assign(users: users, providers: providers, agents: agents, projects: projects)}
   end
 
@@ -94,6 +95,15 @@ defmodule FrontSeatWeb.SettingsLive do
               stat={count(length(@projects), "project")}
               detail={join_names(Enum.map(@projects, & &1.name))}
               navigate={~p"/settings/projects"}
+            />
+            <.settings_tile
+              :if={@admin?}
+              id="settings-tile-ui"
+              icon="hero-swatch"
+              label="UI"
+              stat={if @show_cost_on_cards?, do: "Cost shown on cards", else: "Cost hidden on cards"}
+              detail="Display preferences for every board"
+              navigate={~p"/settings/ui"}
             />
             <.settings_tile
               :if={@admin?}

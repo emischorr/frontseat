@@ -9,6 +9,7 @@ defmodule FrontSeatWeb.BoardLive do
   """
   use FrontSeatWeb, :live_view
 
+  alias FrontSeat.Accounts
   alias FrontSeat.Accounts.Policy
   alias FrontSeat.Agents
   alias FrontSeat.Costs
@@ -41,6 +42,7 @@ defmodule FrontSeatWeb.BoardLive do
         project: project,
         can_operate?: Policy.can?(scope, :operate_task, project.id),
         can_create?: Policy.can?(scope, :create_task, project.id),
+        show_cost_on_cards?: Accounts.get_ui_settings().show_cost_on_cards,
         columns: @columns,
         mobile_column: :planning,
         scheduling_task: nil,
@@ -458,6 +460,7 @@ defmodule FrontSeatWeb.BoardLive do
     Map.take(assigns, [
       :project,
       :can_operate?,
+      :show_cost_on_cards?,
       :spend,
       :agents,
       :queued_positions,
@@ -534,6 +537,7 @@ defmodule FrontSeatWeb.BoardLive do
       tokens={@spend.tokens}
       duration_ms={@spend.duration_ms}
       cost_mode={@cost_mode}
+      show_cost?={@ctx.show_cost_on_cards?}
       navigate={~p"/projects/#{@ctx.project.id}/tasks/#{@task.id}?column=#{@column}"}
       warn={@task.attention != nil}
       muted={@column == :done}

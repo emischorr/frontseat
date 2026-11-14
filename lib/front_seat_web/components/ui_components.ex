@@ -229,6 +229,7 @@ defmodule FrontSeatWeb.UIComponents do
   is a local model. The caller resolves it — this component knows
   nothing about providers.
   """
+  attr :id, :string, default: nil
   attr :cost_cents, :integer, default: nil
   attr :tokens, :integer, default: nil
   attr :duration_ms, :integer, default: nil
@@ -238,7 +239,7 @@ defmodule FrontSeatWeb.UIComponents do
 
   def cost_stat(assigns) do
     ~H"""
-    <span class={["font-mono text-[11px] text-text3", @class]} title={@title}>
+    <span id={@id} class={["font-mono text-[11px] text-text3", @class]} title={@title}>
       {Format.run_stat(@cost_cents, @tokens, @duration_ms, @cost_mode)}
     </span>
     """
@@ -585,6 +586,7 @@ defmodule FrontSeatWeb.UIComponents do
   attr :tokens, :integer, default: nil
   attr :duration_ms, :integer, default: nil
   attr :cost_mode, :atom, default: :exact
+  attr :show_cost?, :boolean, default: true
   attr :navigate, :string, required: true
   attr :warn, :boolean, default: false
   attr :muted, :boolean, default: false, doc: "slightly faded, for Done cards"
@@ -613,6 +615,8 @@ defmodule FrontSeatWeb.UIComponents do
       <div class="flex flex-wrap items-center gap-1.5">
         <.agent_pill :if={@agent_name} name={@agent_name} harness={@harness} />
         <.cost_stat
+          :if={@show_cost?}
+          id={"#{@id}-cost"}
           cost_cents={@cost_cents}
           tokens={@tokens}
           duration_ms={@duration_ms}
