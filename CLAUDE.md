@@ -39,6 +39,7 @@ mix test test/path/file_test.exs:42     # single test by line
 
 mix precommit                 # compile --warnings-as-errors + deps.unlock --unused + format + test
 mix credo                     # not part of precommit — run separately
+python3 -m unittest discover -s cli/tests   # frontseat-cli tests (Python 3.9+, stdlib only; own CI job)
 mix ecto.reset                # wipe per-task workspace state + drop + create + migrate + seed; refuses while runs are live (mix front_seat.workspace.clean --force to override)
 ```
 

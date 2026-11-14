@@ -64,3 +64,22 @@ jobs:
       - run: mix deps.unlock --check-unused
 
       - run: mix precommit
+
+  # frontseat-cli (cli/) is a standalone stdlib-only Python script; its tests
+  # live outside `mix precommit` so Elixir contributors need no Python. 3.9
+  # is the floor (macOS command-line tools ship it).
+  cli:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        python: ["3.9", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - run: python3 -m unittest discover -s cli/tests -v

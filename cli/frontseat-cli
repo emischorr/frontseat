@@ -1,0 +1,650 @@
+#!/usr/bin/env python3
+"""frontseat-cli: file and list FrontSeat tasks from a terminal or an agent session.
+
+A thin client over the FrontSeat /api/v1 endpoints. Standard library only,
+Python 3.9+. Copy this one file onto your PATH; there is nothing to install.
+See docs/cli.md in the FrontSeat repository.
+"""
+
+import argparse
+import contextlib
+import errno
+import http.client
+import json
+import logging
+import os
+import socket
+import ssl
+import stat
+import sys
+
+# Some Python builds (e.g. a pyenv/asdf build missing the blake2 hashes) log a
+# traceback per missing hash algorithm the moment `hashlib` is imported, which
+# `urllib.request` does. The CLI uses none of those algorithms, and the noise
+# would bury its own messages, so log output is muted for these imports only.
+logging.disable(logging.CRITICAL)
+try:
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+finally:
+    logging.disable(logging.NOTSET)
+
+VERSION = "0.1.0"
+TIMEOUT_SECONDS = 30
+PROJECT_FILE = ".frontseat"
+TOKEN_PREFIX = "fs_pat_"
+STATES = ("planning", "running", "review", "done")
+WORK_TYPES = ("code", "design", "content", "file")
+
+EXIT_OK = 0
+EXIT_API = 1
+EXIT_CONFIG = 2
+EXIT_AUTH = 3
+EXIT_LICENSE = 4
+EXIT_NOT_FOUND = 5
+EXIT_CONNECTION = 6
+
+EXIT_CODES_HELP = """\
+exit codes:
+  0  success
+  1  other API error (invalid input, server error, unexpected response)
+  2  usage or configuration problem (missing URL/token/project, bad .frontseat)
+  3  authentication failed (token missing on the server, revoked or expired)
+  4  the instance's license does not include API access
+  5  not found (unknown project, or one you are not a member of)
+  6  could not reach the instance (connection, TLS or timeout)"""
+
+CONFIG_HELP = """\
+configuration (first match wins):
+  instance URL  FRONTSEAT_URL, then "url" in .frontseat, then the user config
+  token         FRONTSEAT_TOKEN, then "token" in the user config
+  project       --project, then FRONTSEAT_PROJECT, then "project" in the
+                nearest .frontseat (searched from the current directory up)
+
+  user config   $XDG_CONFIG_HOME/frontseat/config.json
+                (default ~/.config/frontseat/config.json), e.g.
+                {"url": "https://frontseat.example.com", "token": "fs_pat_..."}
+                Keep it private: chmod 600.
+  .frontseat    {"project": 12} or {"project": 12, "url": "https://..."}
+                Safe to commit. A token in it is an error.
+
+  Create tokens in FrontSeat under Account -> API tokens.
+  Private CA: point SSL_CERT_FILE at your CA bundle."""
+
+
+class CliError(Exception):
+    """A failure with an exit code, a message, and what to do next."""
+
+    def __init__(self, code, message, hint=None, details=None):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.hint = hint
+        self.details = details or []
+
+
+# ── configuration ─────────────────────────────────────────────────────────
+
+
+class Config:
+    """Resolves URL, token and project lazily, remembering each source."""
+
+    def __init__(self, env, cwd, warn):
+        self.env = env
+        self.cwd = cwd
+        self.warn = warn
+        self._project_file = None
+        self._project_file_loaded = False
+        self._user_config = None
+        self._user_config_loaded = False
+
+    # Each resolver returns (value, source) or (None, None).
+
+    def url(self):
+        if self.env.get("FRONTSEAT_URL"):
+            return normalize_url(self.env["FRONTSEAT_URL"], "FRONTSEAT_URL"), "FRONTSEAT_URL"
+
+        path, data = self.project_file()
+        if data and data.get("url"):
+            return normalize_url(data["url"], path), path
+
+        cfg_path, cfg = self.user_config()
+        if cfg and cfg.get("url"):
+            return normalize_url(cfg["url"], cfg_path), cfg_path
+
+        return None, None
+
+    def token(self):
+        if self.env.get("FRONTSEAT_TOKEN"):
+            return self.env["FRONTSEAT_TOKEN"].strip(), "FRONTSEAT_TOKEN"
+
+        cfg_path, cfg = self.user_config()
+        if cfg and cfg.get("token"):
+            check_private(cfg_path, self.warn)
+            return str(cfg["token"]).strip(), cfg_path
+
+        return None, None
+
+    def project(self, flag_value):
+        if flag_value is not None:
+            return parse_project(flag_value, "--project"), "--project"
+
+        if self.env.get("FRONTSEAT_PROJECT"):
+            return parse_project(self.env["FRONTSEAT_PROJECT"], "FRONTSEAT_PROJECT"), "FRONTSEAT_PROJECT"
+
+        path, data = self.project_file()
+        if data and data.get("project") is not None:
+            return parse_project(data["project"], path), path
+
+        return None, None
+
+    def require_url(self):
+        url, source = self.url()
+        if not url:
+            raise CliError(
+                EXIT_CONFIG,
+                "No FrontSeat instance URL configured.",
+                "Set FRONTSEAT_URL (e.g. export FRONTSEAT_URL=https://frontseat.example.com) "
+                "or add \"url\" to %s." % self.user_config_path(),
+            )
+        return url, source
+
+    def require_token(self):
+        token, source = self.token()
+        if not token:
+            raise CliError(
+                EXIT_CONFIG,
+                "No API token configured.",
+                "Create a token in FrontSeat under Account -> API tokens, then set "
+                "FRONTSEAT_TOKEN or add \"token\" to %s (chmod 600)." % self.user_config_path(),
+            )
+        return token, source
+
+    def require_project(self, flag_value):
+        project, source = self.project(flag_value)
+        if project is None:
+            raise CliError(
+                EXIT_CONFIG,
+                "No project selected.",
+                "Pass --project ID, set FRONTSEAT_PROJECT, or create a %s file with "
+                "{\"project\": ID} in the repository. Run `frontseat-cli project list` "
+                "to see project ids." % PROJECT_FILE,
+            )
+        return project, source
+
+    def user_config_path(self):
+        base = self.env.get("XDG_CONFIG_HOME") or os.path.join(
+            self.env.get("HOME") or os.path.expanduser("~"), ".config"
+        )
+        return os.path.join(base, "frontseat", "config.json")
+
+    def user_config(self):
+        if not self._user_config_loaded:
+            self._user_config_loaded = True
+            path = self.user_config_path()
+            if os.path.isfile(path):
+                self._user_config = (path, read_json_object(path))
+        return self._user_config or (None, None)
+
+    def project_file(self):
+        if not self._project_file_loaded:
+            self._project_file_loaded = True
+            path = find_upwards(self.cwd, PROJECT_FILE)
+            if path:
+                data = read_json_object(path)
+                reject_secrets(path, data)
+                self._project_file = (path, data)
+        return self._project_file or (None, None)
+
+
+def find_upwards(start, name):
+    current = os.path.abspath(start)
+    while True:
+        candidate = os.path.join(current, name)
+        if os.path.isfile(candidate):
+            return candidate
+        parent = os.path.dirname(current)
+        if parent == current:
+            return None
+        current = parent
+
+
+def read_json_object(path):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError) as error:
+        raise CliError(EXIT_CONFIG, "Cannot read %s: %s" % (path, error),
+                       "It must be a JSON object, e.g. {\"project\": 12}.")
+    if not isinstance(data, dict):
+        raise CliError(EXIT_CONFIG, "%s must contain a JSON object." % path,
+                       "For example: {\"project\": 12}.")
+    return data
+
+
+def reject_secrets(path, data):
+    for key, value in data.items():
+        looks_like_token = isinstance(value, str) and value.strip().startswith(TOKEN_PREFIX)
+        if key.lower() == "token" or looks_like_token:
+            raise CliError(
+                EXIT_CONFIG,
+                "%s contains an API token. It is meant to be committed and must not hold "
+                "credentials." % path,
+                "Remove the token from it (and revoke that token in FrontSeat if the file was "
+                "ever committed). Put the token in FRONTSEAT_TOKEN or the user config instead.",
+            )
+
+
+def check_private(path, warn):
+    try:
+        mode = os.stat(path).st_mode
+    except OSError:
+        return
+    if mode & (stat.S_IRGRP | stat.S_IROTH):
+        warn("warning: %s holds a token and is readable by other users; run: chmod 600 %s"
+             % (path, path))
+
+
+def normalize_url(value, source):
+    url = str(value).strip().rstrip("/")
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise CliError(EXIT_CONFIG, "Invalid instance URL from %s: %r" % (source, value),
+                       "Use the address you open FrontSeat at, e.g. https://frontseat.example.com.")
+    return url
+
+
+def parse_project(value, source):
+    text = str(value).strip()
+    if text.isdigit() and int(text) > 0:
+        return int(text)
+    raise CliError(EXIT_CONFIG, "Invalid project id from %s: %r" % (source, value),
+                   "Projects are identified by their numeric id; run `frontseat-cli project list`.")
+
+
+# ── HTTP ──────────────────────────────────────────────────────────────────
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    # Following a redirect would resend the bearer token to wherever the
+    # server points, so redirects surface as a configuration error instead.
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+class Response:
+    def __init__(self, status, body):
+        self.status = status
+        self.body = body
+
+    def json(self):
+        return json.loads(self.body)
+
+
+class Api:
+    def __init__(self, url, url_source, token, token_source):
+        self.url = url
+        self.url_source = url_source
+        self.token = token
+        self.token_source = token_source
+        self.opener = urllib.request.build_opener(
+            _NoRedirect(), urllib.request.HTTPSHandler(context=ssl.create_default_context())
+        )
+
+    def request(self, method, path, payload=None, context=None):
+        """Sends one request — never retried — and returns the 2xx Response."""
+        data = None
+        headers = {
+            "Authorization": "Bearer " + self.token,
+            "Accept": "application/json",
+            "User-Agent": "frontseat-cli/" + VERSION,
+        }
+        if payload is not None:
+            data = json.dumps(payload).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+
+        target = self.url + path
+        request = urllib.request.Request(target, data=data, headers=headers, method=method)
+
+        try:
+            with self.opener.open(request, timeout=TIMEOUT_SECONDS) as response:
+                return Response(response.status, response.read().decode("utf-8"))
+        except urllib.error.HTTPError as error:
+            body = error.read().decode("utf-8", errors="replace")
+            raise self._api_error(error.code, body, error.headers, context or {})
+        except urllib.error.URLError as error:
+            raise self._unreachable(method, target, error.reason)
+        except OSError as error:
+            # Timeouts during the read, and a server hanging up mid-response
+            # (`http.client.RemoteDisconnected`), arrive unwrapped.
+            raise self._unreachable(method, target, error)
+
+    def _unreachable(self, method, target, reason):
+        """A CliError for a request that never got an HTTP answer."""
+        if isinstance(reason, (socket.timeout, TimeoutError)):
+            hint = "Check the instance URL (%s, from %s) and your network." % (
+                self.url, self.url_source)
+            if method == "POST":
+                hint = ("The task may have been created anyway. Run `frontseat-cli task list` "
+                        "before trying again.")
+            return CliError(EXIT_CONNECTION, "The request to %s timed out after %ss."
+                            % (target, TIMEOUT_SECONDS), hint)
+
+        hint = "Check the instance URL (%s, from %s) and that the instance is running." % (
+            self.url, self.url_source)
+        if isinstance(reason, ssl.SSLError):
+            hint = ("If the instance uses a private CA, point SSL_CERT_FILE at its CA bundle. "
+                    "The URL in use is %s (from %s)." % (self.url, self.url_source))
+        elif method == "POST" and isinstance(reason, (ConnectionResetError,
+                                                      http.client.RemoteDisconnected)):
+            hint = ("The task may have been created anyway. Run `frontseat-cli task list` "
+                    "before trying again.")
+
+        return CliError(EXIT_CONNECTION, "Could not reach FrontSeat at %s: %s."
+                        % (target, describe_reason(reason)), hint)
+
+    def _api_error(self, status, body, headers, context):
+        if 300 <= status < 400:
+            location = headers.get("Location") or "another address"
+            return CliError(
+                EXIT_CONFIG,
+                "The instance URL (from %s) redirects to %s." % (self.url_source, location),
+                "Set the URL to the address FrontSeat is actually served at (often https://).",
+            )
+
+        try:
+            error = json.loads(body)["error"]
+            code, message = error["code"], error["message"]
+            fields = error.get("fields") or {}
+        except (ValueError, KeyError, TypeError):
+            return CliError(
+                EXIT_API,
+                "Unexpected response from %s (HTTP %s)." % (self.url, status),
+                "Check that the instance URL (from %s) points at a FrontSeat instance."
+                % self.url_source,
+            )
+
+        details = []
+        for field in sorted(fields):
+            for problem in fields[field]:
+                details.append("%s: %s" % (field, problem))
+
+        if status == 401:
+            return CliError(
+                EXIT_AUTH, message,
+                "Check the token (from %s). If it was revoked or has expired, create a new one "
+                "in FrontSeat under Account -> API tokens." % self.token_source,
+                details,
+            )
+        if code == "license_required":
+            return CliError(EXIT_LICENSE, message,
+                            "Ask your FrontSeat administrator about a license with API access.",
+                            details)
+        if status == 404:
+            project = context.get("project")
+            hint = None
+            if project is not None:
+                hint = ("Project %s (from %s) does not exist or you are not a member of it. "
+                        "Run `frontseat-cli project list` to see the projects you can use."
+                        % (project, context.get("project_source")))
+            return CliError(EXIT_NOT_FOUND, message, hint, details)
+        if status == 422:
+            return CliError(EXIT_API, message, "Fix the fields above and try again.", details)
+        if code == "setup_required":
+            return CliError(EXIT_API, message,
+                            "Finish the first-run setup at %s/setup." % self.url, details)
+        return CliError(EXIT_API, "%s (HTTP %s)" % (message, status),
+                        "Try again later; if it persists, check the FrontSeat server logs.",
+                        details)
+
+
+def describe_reason(reason):
+    """A short, plain-words description of why a connection failed."""
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return "certificate verification failed (%s)" % (reason.verify_message or reason)
+    if isinstance(reason, ssl.SSLError):
+        return "TLS error (%s)" % (reason.reason or reason)
+    if isinstance(reason, ConnectionRefusedError):
+        return "connection refused (nothing is listening there)"
+    if isinstance(reason, socket.gaierror):
+        return "the host name could not be resolved"
+    if isinstance(reason, (ConnectionResetError, http.client.RemoteDisconnected)):
+        return "the connection was closed by the server"
+    if isinstance(reason, OSError):
+        if reason.errno == errno.EHOSTUNREACH:
+            return "host unreachable"
+        if reason.errno == errno.ENETUNREACH:
+            return "network unreachable"
+        if reason.strerror:
+            return reason.strerror.lower()
+    return str(reason)
+
+
+# ── commands ──────────────────────────────────────────────────────────────
+
+
+def connect(config):
+    url, url_source = config.require_url()
+    token, token_source = config.require_token()
+    return Api(url, url_source, token, token_source)
+
+
+def cmd_whoami(args, config, out, _stdin):
+    api = connect(config)
+    response = api.request("GET", "/api/v1/me")
+    project, project_source = config.project(args.project)
+
+    if args.json:
+        out(response.body)
+        return EXIT_OK
+
+    user = response.json()["data"]
+    out("URL:      %s  (from %s)" % (api.url, api.url_source))
+    out("User:     %s  (id %s, %s)" % (user["username"], user["id"], user["role"]))
+    out("Token:    from %s" % api.token_source)
+    if project is None:
+        out("Project:  not set")
+    else:
+        out("Project:  %s  (from %s)" % (project, project_source))
+    return EXIT_OK
+
+
+def cmd_project_list(args, config, out, _stdin):
+    response = connect(config).request("GET", "/api/v1/projects")
+    if args.json:
+        out(response.body)
+        return EXIT_OK
+
+    projects = response.json()["data"]
+    if not projects:
+        out("No projects. Ask a project maintainer to add you to one.")
+    for project in projects:
+        out("%-6s %s" % (project["id"], project["name"]))
+    return EXIT_OK
+
+
+def cmd_task_list(args, config, out, _stdin):
+    api = connect(config)
+    project, source = config.require_project(args.project)
+    path = "/api/v1/projects/%d/tasks" % project
+    if args.state:
+        path += "?" + urllib.parse.urlencode({"state": args.state})
+
+    response = api.request("GET", path, context={"project": project, "project_source": source})
+    if args.json:
+        out(response.body)
+        return EXIT_OK
+
+    tasks = response.json()["data"]
+    if not tasks:
+        out("No tasks%s in project %s." % (" in " + args.state if args.state else "", project))
+    for task in tasks:
+        out("#%-6s %-9s %s" % (task["id"], task["state"], task["title"]))
+    return EXIT_OK
+
+
+def cmd_task_create(args, config, out, stdin):
+    description = read_description(args, stdin)
+    api = connect(config)
+    project, source = config.require_project(args.project)
+
+    payload = {"title": args.title}
+    if description is not None:
+        payload["description"] = description
+    if args.work_type:
+        payload["work_type"] = args.work_type
+
+    response = api.request("POST", "/api/v1/projects/%d/tasks" % project, payload,
+                           context={"project": project, "project_source": source})
+    if args.json:
+        out(response.body)
+        return EXIT_OK
+
+    task = response.json()["data"]
+    out("Created task #%s: %s" % (task["id"], task["title"]))
+    out(task["url"])
+    return EXIT_OK
+
+
+def read_description(args, stdin):
+    if args.description is not None and args.description_file is not None:
+        raise CliError(EXIT_CONFIG, "Use either --description or --description-file, not both.")
+    if args.description is not None:
+        return args.description
+    if args.description_file is None:
+        return None
+    if args.description_file == "-":
+        stream = getattr(stdin, "buffer", None)
+        return stream.read().decode("utf-8") if stream is not None else stdin.read()
+    try:
+        # Bytes in, decoded once: no newline translation, so Markdown
+        # arrives exactly as written.
+        with open(args.description_file, "rb") as handle:
+            return handle.read().decode("utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        raise CliError(EXIT_CONFIG, "Cannot read %s: %s" % (args.description_file, error))
+
+
+# ── argument parsing ──────────────────────────────────────────────────────
+
+
+def build_parser():
+    formatter = argparse.RawDescriptionHelpFormatter
+
+    root = argparse.ArgumentParser(
+        prog="frontseat-cli",
+        formatter_class=formatter,
+        description="File and list FrontSeat tasks. The CLI only creates and reads tasks;\n"
+                    "starting, moving, editing and deleting them happens on the FrontSeat board.",
+        epilog=CONFIG_HELP + "\n\n" + EXIT_CODES_HELP + "\n\nexample:\n"
+               "  frontseat-cli whoami\n"
+               "  frontseat-cli task create --title \"Add CSV export\" --description-file - <<'EOF'\n"
+               "  ...\n  EOF",
+    )
+    root.add_argument("--version", action="version", version="frontseat-cli " + VERSION)
+    commands = root.add_subparsers(dest="command", metavar="COMMAND")
+    commands.required = True
+
+    def leaf(subparsers, name, help_text, description, example, handler):
+        parser = subparsers.add_parser(
+            name, help=help_text, description=description, formatter_class=formatter,
+            epilog="example:\n  " + example + "\n\n" + CONFIG_HELP + "\n\n" + EXIT_CODES_HELP,
+        )
+        parser.add_argument("--json", action="store_true",
+                            help="print the API's JSON response unchanged")
+        parser.set_defaults(handler=handler)
+        return parser
+
+    def project_flag(parser):
+        parser.add_argument("--project", metavar="ID",
+                            help="project id (default: FRONTSEAT_PROJECT, then .frontseat)")
+
+    whoami = leaf(
+        commands, "whoami", "verify the configuration and show who the token acts as",
+        "Check the configuration: show the instance URL, the user the token acts as and\n"
+        "where each setting came from. The token itself is never printed.",
+        "frontseat-cli whoami", cmd_whoami,
+    )
+    project_flag(whoami)
+
+    project = commands.add_parser("project", help="projects you can access",
+                                  description="Projects you can access.")
+    project_commands = project.add_subparsers(dest="subcommand", metavar="SUBCOMMAND")
+    project_commands.required = True
+    leaf(project_commands, "list", "list the projects you can access",
+         "List the projects you can access, with the ids --project and .frontseat take.",
+         "frontseat-cli project list", cmd_project_list)
+
+    task = commands.add_parser("task", help="list and create tasks",
+                               description="List and create tasks in a project.")
+    task_commands = task.add_subparsers(dest="subcommand", metavar="SUBCOMMAND")
+    task_commands.required = True
+
+    task_list = leaf(
+        task_commands, "list", "list a project's tasks",
+        "List a project's tasks, newest first (archived and cancelled ones excluded,\n"
+        "at most 100). Use it to check for duplicates before creating.",
+        "frontseat-cli task list --state planning", cmd_task_list,
+    )
+    project_flag(task_list)
+    task_list.add_argument("--state", choices=STATES, help="only tasks in this column")
+
+    task_create = leaf(
+        task_commands, "create", "create a task in Planning",
+        "Create a task in the project's Planning column, attributed to you and your token.\n"
+        "Nothing is started. The request is never retried: if it fails with a timeout,\n"
+        "run `frontseat-cli task list` before trying again.",
+        "frontseat-cli task create --title \"Add CSV export\" --description-file notes.md",
+        cmd_task_create,
+    )
+    project_flag(task_create)
+    task_create.add_argument("--title", required=True, help="the task title")
+    task_create.add_argument("--description", help="the description, as an argument")
+    task_create.add_argument("--description-file", metavar="PATH",
+                             help="read the description from a file, or from stdin with '-' "
+                                  "(Markdown is kept exactly as written)")
+    task_create.add_argument("--work-type", choices=WORK_TYPES,
+                             help="kind of work (default: code)")
+    return root
+
+
+# ── entry point ───────────────────────────────────────────────────────────
+
+
+def main(argv=None, env=None, cwd=None, stdin=None, stdout=None, stderr=None):
+    argv = sys.argv[1:] if argv is None else argv
+    env = os.environ if env is None else env
+    cwd = os.getcwd() if cwd is None else cwd
+    stdin = sys.stdin if stdin is None else stdin
+    stdout = sys.stdout if stdout is None else stdout
+    stderr = sys.stderr if stderr is None else stderr
+
+    def out(line):
+        stdout.write(line + "\n")
+
+    def warn(line):
+        stderr.write(line + "\n")
+
+    try:
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            args = build_parser().parse_args(argv)
+    except SystemExit as exit_:
+        return EXIT_CONFIG if exit_.code not in (0, None) else EXIT_OK
+
+    try:
+        return args.handler(args, Config(env, cwd, warn), out, stdin)
+    except CliError as error:
+        warn("frontseat-cli: error: " + error.message)
+        for detail in error.details:
+            warn("  " + detail)
+        if error.hint:
+            warn("hint: " + error.hint)
+        return error.code
+    except KeyboardInterrupt:
+        warn("frontseat-cli: interrupted")
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())

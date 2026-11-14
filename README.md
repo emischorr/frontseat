@@ -67,6 +67,10 @@ Prebuilt images: `ghcr.io/emischorr/frontseat` (`linux/amd64`, `linux/arm64`).
 
 <sub>Working on FrontSeat itself? The root `docker-compose.yml` only starts the dev database. To run a dev server: `docker compose up -d && mix setup && mix phx.server`.</sub>
 
+## Filing tasks from a Claude Code session
+
+Tell Claude "these are good improvements, create a FrontSeat task for each" and they land in Planning, ready for you to organize on the board. [`frontseat-cli`](cli/) is a single Python file you copy onto your `PATH`. It talks to the instance's API with a personal access token from *Account → API tokens*, and a bundled Claude skill teaches Claude to check for duplicates, file only what you approved and write self-contained descriptions. Nothing starts until you start it on the board. API access needs a license that includes it. Setup and commands: [`docs/cli.md`](docs/cli.md).
+
 ## How it compares
 
 | | FrontSeat | [Kandev](https://github.com/kdlbs/kandev) | [Paperclip](https://github.com/paperclipai/paperclip) | [Symphony](https://github.com/openai/symphony) |

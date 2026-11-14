@@ -7,6 +7,9 @@ organize and run work on the board; the API only puts tasks into Planning.
 
 Decision record: [ADR-0017](adr/0017-api-personal-access-tokens.md).
 
+**Client:** [`frontseat-cli`](cli.md) wraps these endpoints in a single-file
+command (and a Claude skill); most people never call the API directly.
+
 ## Requirements
 
 - **A license that includes `:api_access`.** API access is a licensed
