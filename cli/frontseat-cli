@@ -13,6 +13,7 @@ import http.client
 import json
 import logging
 import os
+import re
 import socket
 import ssl
 import stat
@@ -30,12 +31,16 @@ try:
 finally:
     logging.disable(logging.NOTSET)
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 TIMEOUT_SECONDS = 30
 PROJECT_FILE = ".frontseat"
 TOKEN_PREFIX = "fs_pat_"
 STATES = ("planning", "running", "review", "done")
 WORK_TYPES = ("code", "design", "content", "file")
+HEADER_TOKEN_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+RESERVED_HEADERS = frozenset(
+    ("authorization", "accept", "content-type", "content-length", "user-agent", "host")
+)
 
 EXIT_OK = 0
 EXIT_API = 1
@@ -59,17 +64,22 @@ CONFIG_HELP = """\
 configuration (first match wins):
   instance URL  FRONTSEAT_URL, then "url" in .frontseat, then the user config
   token         FRONTSEAT_TOKEN, then "token" in the user config
+  headers       FRONTSEAT_HEADERS, then "headers" in the user config
   project       --project, then FRONTSEAT_PROJECT, then "project" in the
                 nearest .frontseat (searched from the current directory up)
 
   user config   $XDG_CONFIG_HOME/frontseat/config.json
                 (default ~/.config/frontseat/config.json), e.g.
-                {"url": "https://frontseat.example.com", "token": "fs_pat_..."}
+                {"url": "https://frontseat.example.com", "token": "fs_pat_...",
+                 "headers": {"P-Access-Token-Id": "...", "P-Access-Token": "..."}}
                 Keep it private: chmod 600.
   .frontseat    {"project": 12} or {"project": 12, "url": "https://..."}
-                Safe to commit. A token in it is an error.
+                Safe to commit. A token or "headers" entry in it is an error.
 
   Create tokens in FrontSeat under Account -> API tokens.
+  Behind an authenticating proxy, set FRONTSEAT_HEADERS to the extra headers
+  it needs, newline-separated, e.g.
+  FRONTSEAT_HEADERS=$'P-Access-Token-Id: ...\\nP-Access-Token: ...'
   Private CA: point SSL_CERT_FILE at your CA bundle."""
 
 
@@ -125,6 +135,22 @@ class Config:
             return str(cfg["token"]).strip(), cfg_path
 
         return None, None
+
+    def headers(self):
+        if self.env.get("FRONTSEAT_HEADERS"):
+            mapping = parse_header_lines(self.env["FRONTSEAT_HEADERS"], "FRONTSEAT_HEADERS")
+            return validate_headers(mapping, "FRONTSEAT_HEADERS"), "FRONTSEAT_HEADERS"
+
+        cfg_path, cfg = self.user_config()
+        if cfg and cfg.get("headers") is not None:
+            check_private(cfg_path, self.warn)
+            mapping = cfg["headers"]
+            if not isinstance(mapping, dict) or not all(isinstance(v, str) for v in mapping.values()):
+                raise CliError(EXIT_CONFIG,
+                               "\"headers\" in %s must be an object whose values are strings." % cfg_path)
+            return validate_headers(mapping, cfg_path), cfg_path
+
+        return {}, None
 
     def project(self, flag_value):
         if flag_value is not None:
@@ -234,6 +260,13 @@ def reject_secrets(path, data):
                 "Remove the token from it (and revoke that token in FrontSeat if the file was "
                 "ever committed). Put the token in FRONTSEAT_TOKEN or the user config instead.",
             )
+        if key.lower() == "headers":
+            raise CliError(
+                EXIT_CONFIG,
+                "%s contains \"headers\". It is meant to be committed and must not hold proxy "
+                "credentials." % path,
+                "Put the headers in FRONTSEAT_HEADERS or \"headers\" in the user config instead.",
+            )
 
 
 def check_private(path, warn):
@@ -242,7 +275,7 @@ def check_private(path, warn):
     except OSError:
         return
     if mode & (stat.S_IRGRP | stat.S_IROTH):
-        warn("warning: %s holds a token and is readable by other users; run: chmod 600 %s"
+        warn("warning: %s holds credentials and is readable by other users; run: chmod 600 %s"
              % (path, path))
 
 
@@ -261,6 +294,43 @@ def parse_project(value, source):
         return int(text)
     raise CliError(EXIT_CONFIG, "Invalid project id from %s: %r" % (source, value),
                    "Projects are identified by their numeric id; run `frontseat-cli project list`.")
+
+
+def parse_header_lines(text, source):
+    """Parses the FRONTSEAT_HEADERS form: newline-separated "Name: value" lines."""
+    headers = {}
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        name, sep, value = line.partition(":")
+        name = name.strip()
+        if not sep or not name:
+            raise CliError(EXIT_CONFIG, "Invalid header line from %s: %r" % (source, line),
+                           "Use \"Name: value\", one header per line.")
+        headers[name] = value.strip()
+    return headers
+
+
+def validate_headers(mapping, source):
+    for name, value in mapping.items():
+        if not HEADER_TOKEN_RE.match(name):
+            raise CliError(
+                EXIT_CONFIG, "Invalid header name from %s: %r" % (source, name),
+                "Header names must be a single RFC 7230 token: letters, digits, and "
+                "!#$%&'*+.^_`|~-.",
+            )
+        if "\r" in value or "\n" in value:
+            raise CliError(EXIT_CONFIG,
+                           "Invalid header value from %s for %r: contains a carriage return "
+                           "or newline." % (source, name))
+        if name.lower() in RESERVED_HEADERS:
+            raise CliError(
+                EXIT_CONFIG,
+                "%s sets the %s header, which frontseat-cli manages itself." % (source, name),
+                "Remove it; the CLI already sends its own %s." % name,
+            )
+    return mapping
 
 
 # ── HTTP ──────────────────────────────────────────────────────────────────
@@ -283,11 +353,13 @@ class Response:
 
 
 class Api:
-    def __init__(self, url, url_source, token, token_source):
+    def __init__(self, url, url_source, token, token_source, extra_headers=None, headers_source=None):
         self.url = url
         self.url_source = url_source
         self.token = token
         self.token_source = token_source
+        self.extra_headers = extra_headers or {}
+        self.headers_source = headers_source
         self.opener = urllib.request.build_opener(
             _NoRedirect(), urllib.request.HTTPSHandler(context=ssl.create_default_context())
         )
@@ -295,11 +367,14 @@ class Api:
     def request(self, method, path, payload=None, context=None):
         """Sends one request — never retried — and returns the 2xx Response."""
         data = None
-        headers = {
+        # Extra headers go in first so the CLI's own Authorization/Accept/
+        # User-Agent always win, even if one slipped past validation.
+        headers = dict(self.extra_headers)
+        headers.update({
             "Authorization": "Bearer " + self.token,
             "Accept": "application/json",
             "User-Agent": "frontseat-cli/" + VERSION,
-        }
+        })
         if payload is not None:
             data = json.dumps(payload).encode("utf-8")
             headers["Content-Type"] = "application/json"
@@ -319,6 +394,11 @@ class Api:
             # Timeouts during the read, and a server hanging up mid-response
             # (`http.client.RemoteDisconnected`), arrive unwrapped.
             raise self._unreachable(method, target, error)
+
+    def _proxy_hint(self):
+        state = "from %s" % self.headers_source if self.headers_source else "none"
+        return ("If the instance is behind an authenticating proxy, set the headers it needs "
+                "in FRONTSEAT_HEADERS (currently: %s)." % state)
 
     def _unreachable(self, method, target, reason):
         """A CliError for a request that never got an HTTP answer."""
@@ -350,7 +430,8 @@ class Api:
             return CliError(
                 EXIT_CONFIG,
                 "The instance URL (from %s) redirects to %s." % (self.url_source, location),
-                "Set the URL to the address FrontSeat is actually served at (often https://).",
+                "Set the URL to the address FrontSeat is actually served at (often https://). "
+                + self._proxy_hint(),
             )
 
         try:
@@ -358,11 +439,13 @@ class Api:
             code, message = error["code"], error["message"]
             fields = error.get("fields") or {}
         except (ValueError, KeyError, TypeError):
+            hint = "Check that the instance URL (from %s) points at a FrontSeat instance." % self.url_source
+            if status in (401, 403):
+                hint += " " + self._proxy_hint()
             return CliError(
                 EXIT_API,
                 "Unexpected response from %s (HTTP %s)." % (self.url, status),
-                "Check that the instance URL (from %s) points at a FrontSeat instance."
-                % self.url_source,
+                hint,
             )
 
         details = []
@@ -427,7 +510,8 @@ def describe_reason(reason):
 def connect(config):
     url, url_source = config.require_url()
     token, token_source = config.require_token()
-    return Api(url, url_source, token, token_source)
+    headers, headers_source = config.headers()
+    return Api(url, url_source, token, token_source, headers, headers_source)
 
 
 def cmd_whoami(args, config, out, _stdin):
@@ -443,6 +527,10 @@ def cmd_whoami(args, config, out, _stdin):
     out("URL:      %s  (from %s)" % (api.url, api.url_source))
     out("User:     %s  (id %s, %s)" % (user["username"], user["id"], user["role"]))
     out("Token:    from %s" % api.token_source)
+    if api.extra_headers:
+        out("Headers:  %s  (from %s)" % (", ".join(api.extra_headers), api.headers_source))
+    else:
+        out("Headers:  none")
     if project is None:
         out("Project:  not set")
     else:

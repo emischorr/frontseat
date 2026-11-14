@@ -36,6 +36,7 @@ tokens**.
 |---|---|
 | Instance URL | `FRONTSEAT_URL` → `"url"` in `.frontseat` → `"url"` in the user config |
 | Token | `FRONTSEAT_TOKEN` → `"token"` in the user config |
+| Headers | `FRONTSEAT_HEADERS` → `"headers"` in the user config |
 | Project | `--project ID` → `FRONTSEAT_PROJECT` → `"project"` in `.frontseat` |
 
 **User config.** `$XDG_CONFIG_HOME/frontseat/config.json`, by default
@@ -58,8 +59,34 @@ belong to, and optionally the instance URL:
 
 It is meant to be committed, so **it must never hold a token**: a `token`
 key, or any value starting with `fs_pat_`, is an error (exit 2), never a
-fallback. Projects are identified by their numeric id; `frontseat-cli project
-list` shows the ids.
+fallback. A `headers` key is an error for the same reason: proxy credentials
+are secrets too. Projects are identified by their numeric id; `frontseat-cli
+project list` shows the ids.
+
+**Behind an authenticating proxy.** If the instance is reachable only through
+a proxy that requires its own headers — for example a [Pangolin][pangolin]
+tunnel, which lets browsers through after a login but expects non-browser
+clients to carry `P-Access-Token-Id` and `P-Access-Token` — set
+`FRONTSEAT_HEADERS` to the headers it needs, one `Name: value` per line:
+
+```bash
+export FRONTSEAT_HEADERS=$'P-Access-Token-Id: abc\nP-Access-Token: xyz'
+frontseat-cli whoami
+```
+
+or add them to the user config instead:
+
+```json
+{"headers": {"P-Access-Token-Id": "abc", "P-Access-Token": "xyz"}}
+```
+
+`Authorization`, `Accept`, `Content-Type`, `Content-Length`, `User-Agent` and
+`Host` are refused: the CLI already sends its own, and letting a proxy header
+silently override the bearer token would turn into a confusing 401 instead of
+a clear configuration error. `whoami` lists the configured header *names*
+only; values are never printed, logged, or included in any error message.
+
+[pangolin]: https://github.com/fosrl/pangolin
 
 **TLS.** The CLI uses Python's default certificate verification and has no
 option to turn it off. For an instance behind a private CA, point
@@ -84,6 +111,7 @@ $ frontseat-cli whoami
 URL:      https://frontseat.example.com  (from FRONTSEAT_URL)
 User:     ada  (id 3, member)
 Token:    from /home/ada/.config/frontseat/config.json
+Headers:  none
 Project:  12  (from /home/ada/src/app/.frontseat)
 ```
 
