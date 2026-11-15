@@ -51,3 +51,5 @@ npm-debug.log
 /workspace/
 
 *.har
+# Python bytecode caches (frontseat-cli tests).
+__pycache__/

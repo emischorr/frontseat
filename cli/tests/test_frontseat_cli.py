@@ -222,11 +222,13 @@ class ConfigurationTest(CliTestCase):
         self.assertIn("Invalid project id", err)
 
     def test_a_token_in_the_project_file_is_an_error(self):
+        commands = (("task", "list"), ("whoami",), ("project", "list"))
         for data in ({"project": 1, "token": "anything"}, {"project": 1, "auth": TOKEN}):
             self.write(os.path.join(self.repo, ".frontseat"), data)
-            code, _out, err = self.run_cli("task", "list")
-            self.assertEqual(code, cli.EXIT_CONFIG)
-            self.assertIn("contains an API token", err)
+            for command in commands:
+                code, _out, err = self.run_cli(*command)
+                self.assertEqual(code, cli.EXIT_CONFIG, command)
+                self.assertIn("contains an API token", err)
         self.assertEqual(self.stub.requests, [])
 
     def test_a_malformed_project_file_is_an_error(self):

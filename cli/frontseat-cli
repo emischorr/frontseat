@@ -508,6 +508,9 @@ def describe_reason(reason):
 
 
 def connect(config):
+    # Load .frontseat eagerly: its secrets check must refuse the file before any
+    # request goes out, even for commands that only consult it afterwards (or never).
+    config.project_file()
     url, url_source = config.require_url()
     token, token_source = config.require_token()
     headers, headers_source = config.headers()
